@@ -39,12 +39,17 @@ python main.py
    - 處理題庫匯入時的 ID 重新分配邏輯
    - **Hash 去重系統**: 自動識別並防止重複題目（忽略選項順序）
    - **近似比對系統**: 使用 difflib 計算相似度，可配置閾值和權重
+   - **標點符號正規化**: 智慧偵測中文語境，自動統一標點符號格式
    - **圖片管理**: 自動儲存和管理題目相關圖片
 
 3. **UI 層** (`main.py`)
    - `QuestionExtractorApp`: tkinter GUI 應用程式
    - 使用背景執行緒處理圖片，避免 UI 凍結
    - 控制面板分為三區：檔案操作、圖片處理、題庫管理
+   - **批量答題功能**: `BatchAnswerDialog` 批量調用 AI 生成答案
+   - **批量解題功能**: `BatchGenerateNoteDialog` 批量生成題目解析
+   - **全局設定**: `GlobalSettingsDialog` 統一管理應用程式設定
+   - **圖片關鍵字偵測**: 自動識別題目中的圖片相關關鍵字
 
 ### 資料結構
 
@@ -109,7 +114,7 @@ python main.py
 - UI 中顯示圖片連結，點擊可用系統預設程式開啟
 - 支援 Windows、macOS、Linux 跨平台開啟圖片
 
-**自動縮放機制** (`save_image()` 方法):
+**自動縮放機制** (`save_image()` 和 `encode_image_to_base64()` 方法):
 1. **尺寸檢測**: 計算圖片短邊（`min(width, height)`）
 2. **條件縮放**:
    - 短邊 > 1200px → 等比縮小至短邊 1200px
@@ -118,6 +123,10 @@ python main.py
    - 最適合文字內容的重採樣演算法
    - 保持邊緣銳利，不會模糊
    - 品質優於 BILINEAR 和 BICUBIC
+4. **雙重縮放優化**:
+   - **儲存時**: `save_image()` 縮放後儲存至 `images/` 資料夾
+   - **上傳時**: `encode_image_to_base64()` 在記憶體中縮放後上傳至 API
+   - 目的: 節省 API 上傳時間和成本，同時保持本地儲存效率
 
 **格式轉換**:
 - 自動將 PNG/RGBA/LA/P 模式轉換為 RGB
@@ -128,6 +137,7 @@ python main.py
 **實際效果**:
 - 4K 螢幕截圖 (3840x2160) → 縮放至 2133x1200
 - 檔案大小從 2-3 MB → 200-400 KB（節省 80-90%）
+- API 上傳流量同樣減少 80-90%
 - 文字依然清晰可讀
 
 ### 近似比對系統
@@ -166,6 +176,121 @@ python main.py
   - 點擊後使用系統預設程式開啟（跨平台支援）
   - 方便使用者直接比對原圖判斷哪個正確
 
+### 標點符號正規化系統
+
+**核心功能** (`normalize_punctuation()` 靜態方法):
+- 自動統一題目和選項中的標點符號格式
+- 在 hash 計算**之前**執行，確保相同內容不因標點差異而被判定為不同題目
+
+**三種模式**:
+1. `disabled`: 停用（預設）
+2. `to_fullwidth`: 轉換為全形標點（`,` → `，`、`?` → `？`）
+3. `to_halfwidth`: 轉換為半形標點（`，` → `,`、`？` → `?`）
+
+**智慧中文語境偵測** (`is_chinese_context()` 內部方法):
+- 檢查標點符號前後 2 個字元的上下文
+- 偵測條件:
+  - 包含中日韓統一表意文字 (U+4E00-U+9FFF, U+3400-U+4DBF)
+  - 包含中文標點符號（，。！？；：「」『』等）
+- 只在中文語境下轉換標點，保留其他語言原樣
+
+**特殊處理**:
+- **小數點保護**: 不轉換數字中的小數點（如 `3.14`）
+- **URL 保護**: 不轉換網址中的符號
+- 使用正則表達式 `\d+\.\d+` 偵測數字格式
+
+**執行時機**:
+- `add_question()` 方法開頭立即執行
+- 在 hash 計算之前完成正規化
+- 確保重複偵測的準確性
+
+**範例**:
+```python
+# 輸入（混合標點）
+question = "這是一個測試,對嗎?"
+# 輸出（to_fullwidth 模式）
+question = "這是一個測試，對嗎？"
+
+# 輸入（保留小數點）
+question = "圓周率約為3.14,對嗎?"
+# 輸出
+question = "圓周率約為3.14，對嗎？"
+
+# 輸入（英文語境保留）
+question = "This is a test, right?"
+# 輸出（不變）
+question = "This is a test, right?"
+```
+
+### 批量答題與解題系統
+
+**批量答題** (`BatchAnswerDialog` 類別):
+- 批量調用 `AnswerClient` 為題目生成答案和解析
+- 可選項:
+  - **跳過已答**: 跳過已有答案的題目
+  - **生成解析**: 同時生成題目解析（note）
+  - **包含圖片**: 將題目圖片一併發送給 AI
+  - **批次大小**: 控制每批處理的題目數量（預設 10）
+- 進度顯示:
+  - 即時日誌輸出處理狀態
+  - 顯示答案和解析內容
+  - 統計處理成功/失敗數量
+- 背景執行緒處理，不阻塞 UI
+
+**批量解題** (`BatchGenerateNoteDialog` 類別):
+- 專門用於批量生成題目解析（note）
+- 可選項:
+  - **跳過已有解析**: 跳過已有 note 的題目
+  - **跳過無答案**: 跳過未設定答案的題目
+  - **包含圖片**: 將題目圖片一併發送給 AI
+  - **批次大小**: 控制每批處理的題目數量（預設 10）
+- 同樣使用背景執行緒和即時日誌
+
+**圖片關鍵字自動偵測** (`contains_image_keywords()` 靜態方法):
+- 自動偵測題目中是否包含圖片相關關鍵字
+- 關鍵字列表（不區分大小寫）:
+  - 繁體中文: 圖、圖片、圖像、圖表、照片、截圖
+  - 簡體中文: 图、图片、图像、图表、照片、截图
+  - 英文: image, images, picture, pictures, photo, photos, figure, figures, screenshot, pic, pics
+- 當偵測到關鍵字時，自動強制包含圖片發送至 AI
+- 可在全局設定中開啟/關閉（預設關閉）
+- 日誌輸出: "偵測到圖片關鍵字，自動包含圖片"
+
+**非阻塞處理流程**:
+1. 使用者點擊按鈕開啟對話框
+2. 設定選項後點擊「開始處理」
+3. 背景執行緒開始批量處理
+4. 主視窗可繼續操作
+5. 日誌即時更新處理狀態
+6. 完成後顯示統計資訊
+
+### 全局設定系統
+
+**全局設定對話框** (`GlobalSettingsDialog` 類別):
+- 統一管理應用程式全局設定
+- 設定內容儲存至 `config.json`
+- 修改後立即生效（部分需重啟程式）
+
+**當前設定項目**:
+
+1. **標點符號自動整理**:
+   - 三選一: 停用 / 轉全形 / 轉半形
+   - 影響範圍: 所有新增題目
+   - 執行時機: hash 計算之前
+   - 重啟後生效（資料庫初始化時讀取）
+
+2. **圖片自動偵測**:
+   - 核取方塊: 自動偵測題目中的圖片關鍵字
+   - 影響範圍: 批量答題和批量解題
+   - 立即生效（不需重啟）
+
+**UI 設計**:
+- 使用 `ttk.LabelFrame` 分組顯示不同類別設定
+- 單選按鈕 (`ttk.Radiobutton`) 用於互斥選項
+- 核取方塊 (`ttk.Checkbutton`) 用於開關選項
+- 視窗尺寸: 500x500（確保所有內容可見）
+- 模態視窗: 使用 `grab_set()` 確保使用者完成設定
+
 ## 配置檔案
 
 ### config.json
@@ -177,16 +302,35 @@ python main.py
   "site_name": "Question Extractor",
   "similarity_threshold": 0.75,
   "question_weight": 0.6,
-  "options_weight": 0.4
+  "options_weight": 0.4,
+  "punctuation_mode": "disabled",
+  "auto_detect_image_keywords": false
 }
 ```
 
 - API 金鑰不應提交到版本控制
 - 提供 `config.example.json` 作為模板
+
+**參數說明**:
+
 - **相似度參數**:
-  - `similarity_threshold`: 0.0-1.0，越高越嚴格
+  - `similarity_threshold`: 0.0-1.0，越高越嚴格（預設 0.75）
+  - `question_weight`: 題目相似度權重（預設 0.6）
+  - `options_weight`: 選項相似度權重（預設 0.4）
   - `question_weight` + `options_weight` 應等於 1.0
   - 這些參數在資料庫初始化時讀取，重啟程式後生效
+
+- **標點符號正規化**:
+  - `punctuation_mode`: "disabled", "to_fullwidth", "to_halfwidth"
+  - 預設: "disabled"（停用）
+  - 影響新增題目時的標點符號處理
+  - 修改後需重啟程式生效
+
+- **圖片關鍵字偵測**:
+  - `auto_detect_image_keywords`: true / false
+  - 預設: false（停用）
+  - 影響批量答題和批量解題時的圖片發送邏輯
+  - 修改後立即生效
 
 ## 匯出格式
 
@@ -260,3 +404,11 @@ img.save(dest_path, 'JPEG', quality=98, optimize=True)
 15. **透明背景**: PNG 透明背景會自動轉為白色，確保 JPEG 相容
 16. **Pillow 依賴**: 必須安裝 Pillow >= 10.0.0，舊版本 `Image.Resampling.LANCZOS` API 不同
 17. **圖片鎖定**: Windows 上圖片開啟後可能被鎖定，清理測試檔案時需處理 PermissionError
+18. **標點符號正規化時機**: `normalize_punctuation()` 必須在 `calculate_*_hash()` 之前執行，否則去重會失效
+19. **中文語境偵測**: 檢查前後 2 字元而非 1 字元，提高偵測準確度
+20. **圖片關鍵字大小寫**: 使用 `text.lower()` 和 `keyword.lower()` 確保不區分大小寫比對
+21. **全局設定模態**: `GlobalSettingsDialog` 必須使用 `grab_set()` 避免使用者在設定未完成時操作主視窗
+22. **批量處理記憶體**: 批次大小預設 10，避免大量 API 請求造成記憶體溢出
+23. **背景執行緒 UI 更新**: 批量處理的日誌必須透過 `root.after()` 更新，直接呼叫會導致執行緒錯誤
+24. **config.json 預設值**: 新增配置項目時必須在程式碼中提供 `config.get('key', default)` 預設值，避免舊版 config 造成 KeyError
+25. **圖片上傳優化**: `encode_image_to_base64()` 在記憶體中縮放，不影響原始檔案，節省 API 成本

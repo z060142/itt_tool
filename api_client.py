@@ -8,6 +8,8 @@ import json
 import base64
 from pathlib import Path
 from typing import Dict, Optional
+from PIL import Image
+import io
 
 
 class OpenRouterClient:
@@ -27,29 +29,73 @@ class OpenRouterClient:
         self.site_name = site_name
         self.api_url = "https://openrouter.ai/api/v1/chat/completions"
 
-    def encode_image_to_base64(self, image_path: str) -> str:
+    def encode_image_to_base64(self, image_path: str, max_short_side: int = 1200) -> str:
         """
-        將本地圖片編碼為base64
+        將本地圖片編碼為base64（自動縮放以節省上傳流量）
 
         Args:
             image_path: 圖片路徑
+            max_short_side: 短邊最大像素（預設 1200）
 
         Returns:
             base64編碼的圖片字串
         """
-        with open(image_path, "rb") as image_file:
-            encoded = base64.b64encode(image_file.read()).decode('utf-8')
-            # 獲取圖片副檔名
-            ext = Path(image_path).suffix.lower()
-            mime_type = {
-                '.jpg': 'image/jpeg',
-                '.jpeg': 'image/jpeg',
-                '.png': 'image/png',
-                '.gif': 'image/gif',
-                '.webp': 'image/webp'
-            }.get(ext, 'image/jpeg')
+        try:
+            # 開啟圖片
+            img = Image.open(image_path)
 
-            return f"data:{mime_type};base64,{encoded}"
+            # 轉換為 RGB（處理 PNG 透明背景等）
+            if img.mode in ('RGBA', 'LA', 'P'):
+                # 建立白色背景
+                background = Image.new('RGB', img.size, (255, 255, 255))
+                if img.mode == 'P':
+                    img = img.convert('RGBA')
+                background.paste(img, mask=img.split()[-1] if img.mode in ('RGBA', 'LA') else None)
+                img = background
+            elif img.mode != 'RGB':
+                img = img.convert('RGB')
+
+            # 獲取原始尺寸
+            width, height = img.size
+            short_side = min(width, height)
+
+            # 如果短邊超過限制，等比縮小
+            if short_side > max_short_side:
+                # 計算縮放比例
+                scale = max_short_side / short_side
+
+                # 計算新尺寸
+                new_width = int(width * scale)
+                new_height = int(height * scale)
+
+                # 使用 LANCZOS 演算法縮放（高質量，適合文字）
+                img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+
+                print(f"上傳前縮放圖片: {width}x{height} -> {new_width}x{new_height}")
+
+            # 將圖片編碼為 base64（在記憶體中處理，不儲存檔案）
+            buffer = io.BytesIO()
+            img.save(buffer, format='JPEG', quality=95, optimize=True)
+            encoded = base64.b64encode(buffer.getvalue()).decode('utf-8')
+
+            return f"data:image/jpeg;base64,{encoded}"
+
+        except Exception as e:
+            print(f"圖片處理失敗，使用原始檔案: {e}")
+            # 如果處理失敗，回退到原始方法
+            with open(image_path, "rb") as image_file:
+                encoded = base64.b64encode(image_file.read()).decode('utf-8')
+                # 獲取圖片副檔名
+                ext = Path(image_path).suffix.lower()
+                mime_type = {
+                    '.jpg': 'image/jpeg',
+                    '.jpeg': 'image/jpeg',
+                    '.png': 'image/png',
+                    '.gif': 'image/gif',
+                    '.webp': 'image/webp'
+                }.get(ext, 'image/jpeg')
+
+                return f"data:{mime_type};base64,{encoded}"
 
     def extract_questions_from_image(self, image_path: str) -> Optional[Dict]:
         """

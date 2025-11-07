@@ -10,6 +10,7 @@ import os
 import platform
 import subprocess
 import queue
+import json
 from pathlib import Path
 from api_client import OpenRouterClient, load_config
 from question_database import QuestionDatabase
@@ -36,11 +37,12 @@ class QuestionExtractorApp:
             self.config = None
             self.api_client = None
 
-        # 初始化資料庫（使用配置的權重參數）
+        # 初始化資料庫（使用配置的權重參數和標點模式）
         self.db = QuestionDatabase(
             similarity_threshold=self.config.get('similarity_threshold', 0.75),
             question_weight=self.config.get('question_weight', 0.6),
-            options_weight=self.config.get('options_weight', 0.4)
+            options_weight=self.config.get('options_weight', 0.4),
+            punctuation_mode=self.config.get('punctuation_mode', 'disabled')
         )
 
         # 初始化答題客戶端
@@ -102,6 +104,7 @@ class QuestionExtractorApp:
         ttk.Label(control_frame, text="圖片處理", font=('Arial', 9, 'bold')).pack(pady=(0, 5))
         ttk.Button(control_frame, text="批量上傳圖片", command=self.upload_images, width=20).pack(pady=2)
         ttk.Button(control_frame, text="模型設定", command=self.open_model_settings, width=20).pack(pady=2)
+        ttk.Button(control_frame, text="全局設定", command=self.open_global_settings, width=20).pack(pady=2)
 
         # 分隔線
         ttk.Separator(control_frame, orient='horizontal').pack(fill='x', pady=10)
@@ -109,6 +112,7 @@ class QuestionExtractorApp:
         # 答題功能區
         ttk.Label(control_frame, text="答題功能", font=('Arial', 9, 'bold')).pack(pady=(0, 5))
         ttk.Button(control_frame, text="批量答題", command=self.batch_answer, width=20).pack(pady=2)
+        ttk.Button(control_frame, text="批量注釋", command=self.batch_generate_note, width=20).pack(pady=2)
 
         # 分隔線
         ttk.Separator(control_frame, orient='horizontal').pack(fill='x', pady=10)
@@ -586,6 +590,34 @@ class QuestionExtractorApp:
         file_name = Path(current_file).name
         self.file_label.config(text=f"當前檔案: {file_name}")
 
+    @staticmethod
+    def contains_image_keywords(text: str) -> bool:
+        """
+        檢測文字中是否包含圖片相關關鍵字
+
+        Args:
+            text: 要檢測的文字
+
+        Returns:
+            是否包含圖片關鍵字
+        """
+        # 圖片相關關鍵字列表（繁體、簡體、英文）
+        keywords = [
+            # 繁體中文
+            '圖', '圖片', '圖像', '圖表', '照片', '截圖',
+            # 簡體中文
+            '图', '图片', '图像', '图表', '照片', '截图',
+            # 英文
+            'image', 'images', 'picture', 'pictures', 'photo', 'photos',
+            'figure', 'figures', 'screenshot', 'pic', 'pics'
+        ]
+
+        # 轉為小寫進行比對（英文不區分大小寫）
+        text_lower = text.lower()
+
+        # 檢查是否包含任一關鍵字
+        return any(keyword.lower() in text_lower for keyword in keywords)
+
     def open_model_settings(self):
         """開啟模型設定"""
         ModelSettingsDialog(self.root, self.config, self.reload_clients, self.log)
@@ -617,6 +649,10 @@ class QuestionExtractorApp:
             site_name=self.config.get('site_name', '')
         )
 
+    def open_global_settings(self):
+        """開啟全局設定對話框"""
+        GlobalSettingsDialog(self.root, self.config, self.log)
+
     def batch_answer(self):
         """批量答題"""
         if not self.answer_client:
@@ -629,6 +665,19 @@ class QuestionExtractorApp:
 
         BatchAnswerDialog(self.root, self.db, self.answer_client, self.config,
                          self.refresh_question_list, self.log)
+
+    def batch_generate_note(self):
+        """批量生成注釋"""
+        if not self.answer_client:
+            messagebox.showerror("錯誤", "請先設定答題模型")
+            return
+
+        if len(self.db.get_all_questions()) == 0:
+            messagebox.showwarning("警告", "題庫為空")
+            return
+
+        BatchGenerateNoteDialog(self.root, self.db, self.answer_client, self.config,
+                               self.refresh_question_list, self.log)
 
     def answer_current_question(self):
         """為當前題目答題"""
@@ -904,11 +953,21 @@ class BatchAnswerDialog:
             self.log_callback(f"[{i}/{len(questions)}] 答題中...")
 
             try:
+                # 檢查是否需要自動偵測圖片關鍵字
+                auto_detect = self.config.get('auto_detect_image_keywords', False)
+                should_include_image = include_image
+
+                if auto_detect and not should_include_image:
+                    # 偵測題目中是否包含圖片關鍵字
+                    if QuestionExtractorApp.contains_image_keywords(q['question']):
+                        should_include_image = True
+                        self.log_callback(f"  偵測到圖片關鍵字，自動包含圖片")
+
                 answer, note = self.answer_client.answer_single_question(
                     question=q['question'],
                     options=q['options'],
                     image_path=q.get('image_path', ''),
-                    include_image=include_image,
+                    include_image=should_include_image,
                     generate_note=generate_notes
                 )
 
@@ -1062,6 +1121,207 @@ class GenerateNoteDialog:
 
         except Exception as e:
             self.log_callback(f"注釋生成失敗: {e}")
+
+
+class BatchGenerateNoteDialog:
+    """批量生成注釋對話框"""
+
+    def __init__(self, parent, db, answer_client, config, refresh_callback, log_callback):
+        self.db = db
+        self.answer_client = answer_client
+        self.config = config
+        self.refresh_callback = refresh_callback
+        self.log_callback = log_callback
+
+        self.dialog = tk.Toplevel(parent)
+        self.dialog.title("批量生成注釋")
+        self.dialog.geometry("400x300")
+        self.dialog.transient(parent)
+        self.dialog.grab_set()
+
+        self.create_ui()
+
+    def create_ui(self):
+        main_frame = ttk.Frame(self.dialog, padding="20")
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(main_frame, text="批量生成注釋選項", font=('Arial', 12, 'bold')).pack(pady=10)
+
+        # 選項
+        self.skip_with_note_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(main_frame, text="跳過已有注釋的題目", variable=self.skip_with_note_var).pack(anchor=tk.W, pady=5)
+
+        self.skip_no_answer_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(main_frame, text="跳過沒有答案的題目", variable=self.skip_no_answer_var).pack(anchor=tk.W, pady=5)
+
+        self.include_image_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(main_frame, text="包含圖片", variable=self.include_image_var).pack(anchor=tk.W, pady=5)
+
+        # 說明文字
+        info_label = ttk.Label(main_frame, text="※ 注意：生成注釋需要題目已有正確答案",
+                               font=('Arial', 9), foreground='gray')
+        info_label.pack(pady=10)
+
+        # 按鈕
+        button_frame = ttk.Frame(main_frame)
+        button_frame.pack(pady=20)
+        ttk.Button(button_frame, text="開始生成", command=self.start_generating).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="取消", command=self.dialog.destroy).pack(side=tk.LEFT, padx=5)
+
+    def start_generating(self):
+        self.dialog.destroy()
+
+        skip_with_note = self.skip_with_note_var.get()
+        skip_no_answer = self.skip_no_answer_var.get()
+        include_image = self.include_image_var.get()
+
+        # 在背景執行緒執行
+        import threading
+        thread = threading.Thread(target=self.process_batch,
+                                 args=(skip_with_note, skip_no_answer, include_image))
+        thread.start()
+
+    def process_batch(self, skip_with_note, skip_no_answer, include_image):
+        questions = self.db.get_all_questions()
+        self.log_callback(f"開始批量生成注釋，共 {len(questions)} 道題目")
+
+        success_count = 0
+        skip_count = 0
+
+        for i, q in enumerate(questions, 1):
+            # 跳過沒有答案的題目
+            if skip_no_answer and not q.get('correct_answer'):
+                skip_count += 1
+                continue
+
+            # 跳過已有注釋
+            if skip_with_note and q.get('note'):
+                skip_count += 1
+                continue
+
+            self.log_callback(f"[{i}/{len(questions)}] 生成注釋中...")
+
+            try:
+                # 檢查是否需要自動偵測圖片關鍵字
+                auto_detect = self.config.get('auto_detect_image_keywords', False)
+                should_include_image = include_image
+
+                if auto_detect and not should_include_image:
+                    # 偵測題目中是否包含圖片關鍵字
+                    if QuestionExtractorApp.contains_image_keywords(q['question']):
+                        should_include_image = True
+                        self.log_callback(f"  偵測到圖片關鍵字，自動包含圖片")
+
+                note = self.answer_client.generate_note_for_question(
+                    question=q['question'],
+                    options=q['options'],
+                    answer=q.get('correct_answer', ''),
+                    image_path=q.get('image_path', ''),
+                    include_image=should_include_image
+                )
+
+                if note:
+                    self.db.update_question(q['id'], note=note)
+                    success_count += 1
+                    self.log_callback(f"  ID {q['id']}: 注釋已生成")
+
+            except Exception as e:
+                self.log_callback(f"  ID {q['id']}: 失敗 - {e}")
+
+        self.log_callback(f"批量生成注釋完成！成功: {success_count}, 跳過: {skip_count}")
+        self.refresh_callback()
+
+
+class GlobalSettingsDialog:
+    """全局設定對話框"""
+
+    def __init__(self, parent, config, log_callback):
+        self.config = config
+        self.log_callback = log_callback
+
+        self.dialog = tk.Toplevel(parent)
+        self.dialog.title("全局設定")
+        self.dialog.geometry("500x500")
+        self.dialog.transient(parent)
+        self.dialog.grab_set()
+
+        self.create_ui()
+
+    def create_ui(self):
+        main_frame = ttk.Frame(self.dialog, padding="20")
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(main_frame, text="全局設定", font=('Arial', 12, 'bold')).pack(pady=10)
+
+        # 標點符號處理設定
+        punct_frame = ttk.LabelFrame(main_frame, text="標點符號自動整理", padding="10")
+        punct_frame.pack(fill=tk.X, pady=5)
+
+        self.punctuation_mode_var = tk.StringVar(
+            value=self.config.get('punctuation_mode', 'disabled')
+        )
+
+        ttk.Radiobutton(punct_frame, text="停用（保持原樣）",
+                       variable=self.punctuation_mode_var,
+                       value='disabled').pack(anchor=tk.W, pady=2)
+
+        ttk.Radiobutton(punct_frame, text="轉換為全形（中文環境）",
+                       variable=self.punctuation_mode_var,
+                       value='to_fullwidth').pack(anchor=tk.W, pady=2)
+
+        ttk.Radiobutton(punct_frame, text="轉換為半形",
+                       variable=self.punctuation_mode_var,
+                       value='to_halfwidth').pack(anchor=tk.W, pady=2)
+
+        # 說明文字
+        info_text = "※ 啟用後，AI 返回的題目標點符號會自動統一\n" \
+                   "※ 在中文環境下：, → ，  ? → ？\n" \
+                   "※ 此處理會在相似比對前執行，確保格式一致"
+        ttk.Label(punct_frame, text=info_text, font=('Arial', 8), foreground='gray').pack(pady=5)
+
+        # 圖片關鍵字自動偵測設定
+        image_frame = ttk.LabelFrame(main_frame, text="圖片自動偵測", padding="10")
+        image_frame.pack(fill=tk.X, pady=5)
+
+        self.auto_detect_image_var = tk.BooleanVar(
+            value=self.config.get('auto_detect_image_keywords', False)
+        )
+
+        ttk.Checkbutton(image_frame, text="自動偵測題目中的圖片關鍵字",
+                       variable=self.auto_detect_image_var).pack(anchor=tk.W, pady=5)
+
+        # 說明文字
+        image_info_text = "※ 啟用後，批量答題/注釋時自動偵測關鍵字\n" \
+                         "※ 關鍵字：圖、圖片、圖像、照片、图、图像、\n" \
+                         "  image、images、picture、pictures、photo 等\n" \
+                         "※ 偵測到時會強制發送圖片給 AI，無論是否勾選包含圖片"
+        ttk.Label(image_frame, text=image_info_text, font=('Arial', 8), foreground='gray').pack(pady=5)
+
+        # 按鈕
+        button_frame = ttk.Frame(main_frame)
+        button_frame.pack(pady=15)
+        ttk.Button(button_frame, text="儲存", command=self.save_settings).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="取消", command=self.dialog.destroy).pack(side=tk.LEFT, padx=5)
+
+    def save_settings(self):
+        """儲存設定到 config.json"""
+        try:
+            # 更新配置
+            self.config['punctuation_mode'] = self.punctuation_mode_var.get()
+            self.config['auto_detect_image_keywords'] = self.auto_detect_image_var.get()
+
+            # 儲存到檔案
+            with open('config.json', 'w', encoding='utf-8') as f:
+                json.dump(self.config, f, ensure_ascii=False, indent=2)
+
+            self.log_callback(f"全局設定已儲存：標點模式 = {self.punctuation_mode_var.get()}, "
+                            f"自動偵測圖片 = {self.auto_detect_image_var.get()}")
+            messagebox.showinfo("成功", "設定已儲存！\n\n※ 部分設定需重新啟動程式後生效")
+            self.dialog.destroy()
+
+        except Exception as e:
+            self.log_callback(f"儲存設定失敗: {e}")
+            messagebox.showerror("錯誤", f"儲存設定失敗: {e}")
 
 
 class ExportOptionsDialog:
