@@ -1,0 +1,15 @@
+{
+    "openrouter_api_key": "sk-or-v1-YOUR_API_KEY_HERE",
+    "model": "qwen/qwen3-vl-235b-a22b-instruct",
+    "answer_model": "wen/qwen3-vl-235b-a22b-instruct",
+    "note_model": "",
+    "use_same_model_for_note": true,
+    "note_style": "簡潔明瞭，重點說明概念和解題思路",
+    "note_max_length": 200,
+    "batch_size": 5,
+    "site_url": "http://localhost",
+    "site_name": "Question Extractor",
+    "similarity_threshold": 0.75,
+    "question_weight": 0.6,
+    "options_weight": 0.4
+}
