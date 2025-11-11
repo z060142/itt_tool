@@ -12,7 +12,7 @@ from typing import Dict, List, Optional, Tuple
 class AnswerClient:
     def __init__(self, api_key: str, answer_model: str, note_model: str = None,
                  note_style: str = "", note_max_length: int = 200,
-                 site_url: str = "", site_name: str = ""):
+                 site_url: str = "", site_name: str = "", question_type: str = "single"):
         self.api_key = api_key
         self.answer_model = answer_model
         self.note_model = note_model if note_model else answer_model
@@ -20,6 +20,7 @@ class AnswerClient:
         self.note_max_length = note_max_length
         self.site_url = site_url
         self.site_name = site_name
+        self.question_type = question_type  # "single" 或 "multiple"
         self.api_url = "https://openrouter.ai/api/v1/chat/completions"
 
     def _encode_image(self, image_path: str) -> Optional[str]:
@@ -63,6 +64,14 @@ class AnswerClient:
         # 構建 prompt
         options_text = "\n".join([f"{k}. {v}" for k, v in sorted(options.items())])
 
+        # 根據題目類型調整 prompt
+        if self.question_type == "single":
+            type_instruction = "這是單選題，請謹慎選擇唯一正確的答案。只能選擇一個選項（如A、B、C或D）。"
+            answer_format = "答案選項（單選，只能是A、B、C或D其中之一）"
+        else:  # multiple
+            type_instruction = "這可能是多選題，請選擇所有正確的答案。可以選擇一個或多個選項（如A、AB、ABC等）。"
+            answer_format = "答案選項（如A、AB、ABC等）"
+
         if generate_note:
             prompt = f"""請回答以下選擇題，並提供注釋說明。
 
@@ -70,9 +79,11 @@ class AnswerClient:
 選項：
 {options_text}
 
+{type_instruction}
+
 請以以下JSON格式回答：
 {{
-    "answer": "答案選項（如A、AB、ABC等）",
+    "answer": "{answer_format}",
     "note": "注釋說明"
 }}
 
@@ -85,9 +96,11 @@ class AnswerClient:
 選項：
 {options_text}
 
+{type_instruction}
+
 請以以下JSON格式回答：
 {{
-    "answer": "答案選項（如A、AB、ABC等）"
+    "answer": "{answer_format}"
 }}"""
 
         # 構建訊息

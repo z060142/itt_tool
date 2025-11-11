@@ -2,6 +2,7 @@
     "openrouter_api_key": "sk-or-v1-YOUR_API_KEY_HERE",
     "model": "qwen/qwen3-vl-235b-a22b-instruct",
     "answer_model": "wen/qwen3-vl-235b-a22b-instruct",
+    "question_type": "single",
     "note_model": "",
     "use_same_model_for_note": true,
     "note_style": "簡潔明瞭，重點說明概念和解題思路",

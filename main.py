@@ -58,7 +58,8 @@ class QuestionExtractorApp:
                 note_style=self.config.get('note_style', '簡潔明瞭'),
                 note_max_length=self.config.get('note_max_length', 200),
                 site_url=self.config.get('site_url', ''),
-                site_name=self.config.get('site_name', '')
+                site_name=self.config.get('site_name', ''),
+                question_type=self.config.get('question_type', 'single')
             )
         else:
             self.answer_client = None
@@ -685,7 +686,8 @@ class QuestionExtractorApp:
             note_style=self.config.get('note_style', '簡潔明瞭'),
             note_max_length=self.config.get('note_max_length', 200),
             site_url=self.config.get('site_url', ''),
-            site_name=self.config.get('site_name', '')
+            site_name=self.config.get('site_name', ''),
+            question_type=self.config.get('question_type', 'single')
         )
 
     def open_global_settings(self):
@@ -975,37 +977,48 @@ class ModelSettingsDialog:
         self.answer_model_entry.grid(row=2, column=1, sticky=(tk.W, tk.E), pady=5, padx=5)
         self.answer_model_entry.insert(0, self.config.get('answer_model', 'anthropic/claude-3.5-sonnet'))
 
+        # 題目類型
+        ttk.Label(main_frame, text="題目類型:", font=('Arial', 10, 'bold')).grid(row=3, column=0, sticky=tk.W, pady=5)
+        question_type_frame = ttk.Frame(main_frame)
+        question_type_frame.grid(row=3, column=1, sticky=tk.W, pady=5, padx=5)
+
+        self.question_type_var = tk.StringVar(value=self.config.get('question_type', 'single'))
+        ttk.Radiobutton(question_type_frame, text="單選題（謹慎選擇唯一答案）",
+                       variable=self.question_type_var, value='single').pack(side=tk.LEFT, padx=5)
+        ttk.Radiobutton(question_type_frame, text="多選題（可能多個答案）",
+                       variable=self.question_type_var, value='multiple').pack(side=tk.LEFT, padx=5)
+
         # 注釋模型選項
         self.use_same_model_var = tk.BooleanVar(value=self.config.get('use_same_model_for_note', True))
         ttk.Checkbutton(main_frame, text="注釋使用答題模型", variable=self.use_same_model_var,
-                       command=self.toggle_note_model).grid(row=3, column=1, sticky=tk.W, pady=5, padx=5)
+                       command=self.toggle_note_model).grid(row=4, column=1, sticky=tk.W, pady=5, padx=5)
 
-        ttk.Label(main_frame, text="注釋模型:", font=('Arial', 10, 'bold')).grid(row=4, column=0, sticky=tk.W, pady=5)
+        ttk.Label(main_frame, text="注釋模型:", font=('Arial', 10, 'bold')).grid(row=5, column=0, sticky=tk.W, pady=5)
         self.note_model_entry = ttk.Entry(main_frame, width=50)
-        self.note_model_entry.grid(row=4, column=1, sticky=(tk.W, tk.E), pady=5, padx=5)
+        self.note_model_entry.grid(row=5, column=1, sticky=(tk.W, tk.E), pady=5, padx=5)
         self.note_model_entry.insert(0, self.config.get('note_model', ''))
 
         # 注釋風格
-        ttk.Label(main_frame, text="注釋風格:", font=('Arial', 10, 'bold')).grid(row=5, column=0, sticky=tk.W, pady=5)
+        ttk.Label(main_frame, text="注釋風格:", font=('Arial', 10, 'bold')).grid(row=6, column=0, sticky=tk.W, pady=5)
         self.note_style_entry = ttk.Entry(main_frame, width=50)
-        self.note_style_entry.grid(row=5, column=1, sticky=(tk.W, tk.E), pady=5, padx=5)
+        self.note_style_entry.grid(row=6, column=1, sticky=(tk.W, tk.E), pady=5, padx=5)
         self.note_style_entry.insert(0, self.config.get('note_style', '簡潔明瞭，重點說明概念和解題思路'))
 
         # 注釋字數限制
-        ttk.Label(main_frame, text="注釋字數限制:", font=('Arial', 10, 'bold')).grid(row=6, column=0, sticky=tk.W, pady=5)
+        ttk.Label(main_frame, text="注釋字數限制:", font=('Arial', 10, 'bold')).grid(row=7, column=0, sticky=tk.W, pady=5)
         self.note_max_length_entry = ttk.Entry(main_frame, width=50)
-        self.note_max_length_entry.grid(row=6, column=1, sticky=(tk.W, tk.E), pady=5, padx=5)
+        self.note_max_length_entry.grid(row=7, column=1, sticky=(tk.W, tk.E), pady=5, padx=5)
         self.note_max_length_entry.insert(0, str(self.config.get('note_max_length', 200)))
 
         # 批量答題數量
-        ttk.Label(main_frame, text="批量答題數量:", font=('Arial', 10, 'bold')).grid(row=7, column=0, sticky=tk.W, pady=5)
+        ttk.Label(main_frame, text="批量答題數量:", font=('Arial', 10, 'bold')).grid(row=8, column=0, sticky=tk.W, pady=5)
         self.batch_size_entry = ttk.Entry(main_frame, width=50)
-        self.batch_size_entry.grid(row=7, column=1, sticky=(tk.W, tk.E), pady=5, padx=5)
+        self.batch_size_entry.grid(row=8, column=1, sticky=(tk.W, tk.E), pady=5, padx=5)
         self.batch_size_entry.insert(0, str(self.config.get('batch_size', 5)))
 
         # 按鈕
         button_frame = ttk.Frame(main_frame)
-        button_frame.grid(row=8, column=0, columnspan=2, pady=20)
+        button_frame.grid(row=9, column=0, columnspan=2, pady=20)
         ttk.Button(button_frame, text="儲存", command=self.save_settings).pack(side=tk.LEFT, padx=5)
         ttk.Button(button_frame, text="取消", command=self.dialog.destroy).pack(side=tk.LEFT, padx=5)
 
@@ -1024,6 +1037,7 @@ class ModelSettingsDialog:
                 'openrouter_api_key': self.api_key_entry.get().strip(),
                 'model': self.extract_model_entry.get().strip(),
                 'answer_model': self.answer_model_entry.get().strip(),
+                'question_type': self.question_type_var.get(),
                 'use_same_model_for_note': self.use_same_model_var.get(),
                 'note_model': self.note_model_entry.get().strip(),
                 'note_style': self.note_style_entry.get().strip(),
@@ -1033,7 +1047,14 @@ class ModelSettingsDialog:
                 'site_name': self.config.get('site_name', 'Question Extractor'),
                 'similarity_threshold': self.config.get('similarity_threshold', 0.75),
                 'question_weight': self.config.get('question_weight', 0.6),
-                'options_weight': self.config.get('options_weight', 0.4)
+                'options_weight': self.config.get('options_weight', 0.4),
+                'punctuation_mode': self.config.get('punctuation_mode', 'disabled'),
+                'auto_detect_image_keywords': self.config.get('auto_detect_image_keywords', False),
+                'one_shot_mode_enabled': self.config.get('one_shot_mode_enabled', False),
+                'one_shot_action': self.config.get('one_shot_action', 'answer'),
+                'one_shot_skip_answered': self.config.get('one_shot_skip_answered', True),
+                'one_shot_include_image': self.config.get('one_shot_include_image', True),
+                'one_shot_max_concurrent': self.config.get('one_shot_max_concurrent', 3)
             }
 
             import json
