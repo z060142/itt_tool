@@ -56,7 +56,7 @@ python main.py
 題目資料格式（JSON）:
 ```json
 {
-  "id": 0,
+  "id": 1,
   "question": "題目內容",
   "question_hash": "題目內容的 MD5 hash",
   "options": {
@@ -73,6 +73,8 @@ python main.py
   "created_at": "ISO 時間戳"
 }
 ```
+
+**重要**: 題目 ID 從 1 開始編號，而非 0。
 
 ## 關鍵實作細節
 
@@ -264,6 +266,75 @@ question = "This is a test, right?"
 5. 日誌即時更新處理狀態
 6. 完成後顯示統計資訊
 
+### 🚀 一氣呵成系統（實驗功能）
+
+**核心概念**:
+- 在批量圖片辨識完成後，自動啟動答題/解題流程
+- 每道題目獨立處理，不影響下一張圖片繼續辨識
+- 使用併行任務佇列，避免記憶體溢出
+
+**執行流程**:
+```
+辨識1 → 辨識2 → 辨識3 → 辨識4 ...
+  ↓       ↓       ↓       ↓
+解題1    解題2    解題3    解題4 ...
+  ↓       ↓       ↓       ↓
+[併行任務佇列，最多同時執行 N 個]
+```
+
+**併行任務管理** (`QuestionExtractorApp` 類別):
+- `oneshot_task_queue`: 待處理的題目佇列（`queue.Queue`）
+- `oneshot_active_tasks`: 當前活躍的任務數量
+- `oneshot_lock`: 執行緒鎖（`threading.Lock`），保護任務計數器
+- `oneshot_total_processed/success/failed`: 統計資訊
+
+**核心方法**:
+1. **`check_oneshot_queue()`**: 定期檢查任務佇列並啟動處理
+   - 每 500ms 檢查一次
+   - 檢查當前活躍任務數是否小於最大併行數
+   - 從佇列取出任務並啟動背景執行緒
+
+2. **`process_oneshot_task(task_data)`**: 處理單一任務（背景執行緒）
+   - 獲取題目資料
+   - 根據 action 執行答題/解題
+   - 更新統計資訊
+   - 釋放任務槽
+
+3. **`oneshot_generate_answer(question_data, include_image)`**: 生成答案
+   - 檢查是否跳過已答題目
+   - 自動偵測圖片關鍵字
+   - 調用 `AnswerClient.answer_single_question()`
+   - 更新資料庫
+
+4. **`oneshot_generate_note(question_data, include_image)`**: 生成解析
+   - 檢查是否有答案（沒有答案則跳過）
+   - 檢查是否已有解析（有解析則跳過）
+   - 自動偵測圖片關鍵字
+   - 調用 `AnswerClient.generate_note_for_question()`
+   - 更新資料庫
+
+**整合到圖片處理流程** (`process_images()` 方法):
+- 辨識完成後，如果啟用一氣呵成模式
+- 將新增的題目加入 `oneshot_task_queue`
+- 任務資料包含: `question_id`, `action`, `include_image`
+- 背景佇列處理器會自動開始處理
+
+**併行限制機制**:
+- 使用 `threading.Lock` 保護任務計數器
+- 最大併行數可設定（1-10，預設 3）
+- 任務完成後自動釋放槽位
+- 避免同時發送過多 API 請求導致記憶體溢出
+
+**使用場景**:
+- 批量圖片辨識後需要自動答題
+- 想要一次完成辨識+答題+解題
+- 需要高效率處理大量題目
+
+**注意事項**:
+- 併行數建議設定為 3-5，視電腦效能和 API 限制調整
+- 跳過已答選項避免重複浪費 API 請求
+- 自動偵測圖片關鍵字可提高答題準確度
+
 ### 全局設定系統
 
 **全局設定對話框** (`GlobalSettingsDialog` 類別):
@@ -284,12 +355,23 @@ question = "This is a test, right?"
    - 影響範圍: 批量答題和批量解題
    - 立即生效（不需重啟）
 
+3. **🚀 一氣呵成（實驗功能）**:
+   - 核取方塊: 啟用/停用一氣呵成模式
+   - 辨識後動作: 僅答題 / 僅解題 / 答題+解題
+   - 跳過已答: 跳過已有答案的題目
+   - 包含圖片: 自動發送圖片給 AI
+   - 最大併行任務數: 1-10（預設 3）
+   - 影響範圍: 批量圖片辨識流程
+   - 立即生效（不需重啟）
+
 **UI 設計**:
 - 使用 `ttk.LabelFrame` 分組顯示不同類別設定
 - 單選按鈕 (`ttk.Radiobutton`) 用於互斥選項
 - 核取方塊 (`ttk.Checkbutton`) 用於開關選項
+- 數字選擇器 (`ttk.Spinbox`) 用於併行數量
 - 視窗尺寸: 500x500（確保所有內容可見）
 - 模態視窗: 使用 `grab_set()` 確保使用者完成設定
+- 動態啟用/停用: 一氣呵成選項根據主開關自動切換狀態
 
 ## 配置檔案
 
@@ -304,7 +386,12 @@ question = "This is a test, right?"
   "question_weight": 0.6,
   "options_weight": 0.4,
   "punctuation_mode": "disabled",
-  "auto_detect_image_keywords": false
+  "auto_detect_image_keywords": false,
+  "one_shot_mode_enabled": false,
+  "one_shot_action": "answer",
+  "one_shot_skip_answered": true,
+  "one_shot_include_image": true,
+  "one_shot_max_concurrent": 3
 }
 ```
 
@@ -331,6 +418,21 @@ question = "This is a test, right?"
   - 預設: false（停用）
   - 影響批量答題和批量解題時的圖片發送邏輯
   - 修改後立即生效
+
+- **🚀 一氣呵成模式**:
+  - `one_shot_mode_enabled`: true / false（預設 false）
+    - 啟用後，批量圖片辨識完成後自動答題/解題
+  - `one_shot_action`: "answer" / "note" / "both"（預設 "answer"）
+    - answer: 僅答題
+    - note: 僅解題
+    - both: 答題+解題
+  - `one_shot_skip_answered`: true / false（預設 true）
+    - 跳過已有答案的題目
+  - `one_shot_include_image`: true / false（預設 true）
+    - 自動發送圖片給 AI
+  - `one_shot_max_concurrent`: 1-10（預設 3）
+    - 最大併行任務數，建議 3-5
+  - 修改後立即生效（不需重啟）
 
 ## 匯出格式
 
@@ -385,7 +487,10 @@ img.save(dest_path, 'JPEG', quality=98, optimize=True)
 
 ## 常見陷阱
 
-1. **ID 衝突**: 匯入題庫時必須重新分配 ID，不能直接使用原 ID
+1. **ID 編號**: 題目 ID 從 1 開始編號，而非 0
+   - `next_id` 初始值為 1
+   - 新資料庫、清空資料庫、匯入空資料庫時都從 1 開始
+   - 匯入題庫時必須重新分配 ID，不能直接使用原 ID
 2. **執行緒安全**: 圖片處理在背景執行緒，UI 更新必須透過 `root.after()`
 3. **JSON 解析**: AI 回應可能包含 markdown 標記，需清理後再解析
 4. **檔案編碼**: 所有檔案操作必須指定 `encoding='utf-8'`
@@ -412,3 +517,19 @@ img.save(dest_path, 'JPEG', quality=98, optimize=True)
 23. **背景執行緒 UI 更新**: 批量處理的日誌必須透過 `root.after()` 更新，直接呼叫會導致執行緒錯誤
 24. **config.json 預設值**: 新增配置項目時必須在程式碼中提供 `config.get('key', default)` 預設值，避免舊版 config 造成 KeyError
 25. **圖片上傳優化**: `encode_image_to_base64()` 在記憶體中縮放，不影響原始檔案，節省 API 成本
+26. **Lambda 閉包陷阱**: `root.after()` 中的 lambda 必須使用預設參數捕獲變數值
+   - 錯誤：`lambda: self.log(f"結果: {e}")`（`e` 在 lambda 執行時可能已超出作用域）
+   - 正確：`lambda msg=str(e): self.log(f"結果: {msg}")`
+   - 適用於所有在背景執行緒中透過 `root.after()` 更新 UI 的場景
+27. **靜態方法呼叫**: `contains_image_keywords()` 是 `QuestionExtractorApp` 的靜態方法
+   - 錯誤：`AnswerClient.contains_image_keywords(text)`
+   - 正確：`self.contains_image_keywords(text)` 或 `QuestionExtractorApp.contains_image_keywords(text)`
+   - 一氣呵成方法中使用 `self.contains_image_keywords()` 即可
+28. **API 方法名稱**:
+   - `AnswerClient` 公開方法：`answer_single_question()`, `generate_note_for_question()`, `answer_batch()`
+   - 錯誤：`generate_answer()`, `generate_note()`（這些方法不存在）
+   - 正確：使用上述三個實際存在的方法
+29. **資料庫更新方法**:
+   - `QuestionDatabase` 只有 `update_question(question_id, question=None, options=None, correct_answer=None, note=None)`
+   - 錯誤：`update_answer()`, `update_note()`（這些方法不存在）
+   - 正確：`self.db.update_question(id, correct_answer=answer)` 或 `self.db.update_question(id, note=note)`

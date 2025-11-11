@@ -36,7 +36,7 @@ class QuestionDatabase:
         self.options_weight = options_weight
         self.punctuation_mode = punctuation_mode
         self.questions = []
-        self.next_id = 0  # 下一個可用的 ID
+        self.next_id = 1  # 下一個可用的 ID（從 1 開始）
 
         # 建立圖片目錄
         if not os.path.exists(self.image_dir):
@@ -219,14 +219,14 @@ class QuestionDatabase:
                         if self.questions:
                             self.next_id = max(q['id'] for q in self.questions) + 1
                         else:
-                            self.next_id = 0
+                            self.next_id = 1  # 空資料庫從 1 開始
             except Exception as e:
                 print(f"載入題目庫失敗: {e}")
                 self.questions = []
-                self.next_id = 0
+                self.next_id = 1  # 錯誤時從 1 開始
         else:
             self.questions = []
-            self.next_id = 0
+            self.next_id = 1  # 新資料庫從 1 開始
 
     def save(self):
         """儲存題目庫到檔案"""
@@ -634,7 +634,7 @@ class QuestionDatabase:
             是否成功
         """
         self.questions = []
-        self.next_id = 0  # 重置 next_id
+        self.next_id = 1  # 重置 next_id（從 1 開始）
         return self.save()
 
     def get_statistics(self) -> Dict:
@@ -678,7 +678,7 @@ class QuestionDatabase:
                     if self.questions:
                         self.next_id = max(q['id'] for q in self.questions) + 1
                     else:
-                        self.next_id = 0
+                        self.next_id = 1  # 空資料庫從 1 開始
 
                 return True
         except Exception as e:

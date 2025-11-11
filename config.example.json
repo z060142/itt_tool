@@ -11,5 +11,12 @@
     "site_name": "Question Extractor",
     "similarity_threshold": 0.75,
     "question_weight": 0.6,
-    "options_weight": 0.4
+    "options_weight": 0.4,
+    "punctuation_mode": "disabled",
+    "auto_detect_image_keywords": false,
+    "one_shot_mode_enabled": false,
+    "one_shot_action": "answer",
+    "one_shot_skip_answered": true,
+    "one_shot_include_image": true,
+    "one_shot_max_concurrent": 3
 }

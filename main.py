@@ -66,6 +66,14 @@ class QuestionExtractorApp:
         # 建立待處理清單（用於近似題目比對）
         self.pending_queue = queue.Queue()
 
+        # 一氣呵成模式：併行任務管理
+        self.oneshot_task_queue = queue.Queue()  # 待處理的題目佇列
+        self.oneshot_active_tasks = 0  # 當前活躍的任務數
+        self.oneshot_lock = threading.Lock()  # 執行緒鎖，保護任務計數器
+        self.oneshot_total_processed = 0  # 總處理數
+        self.oneshot_total_success = 0  # 成功數
+        self.oneshot_total_failed = 0  # 失敗數
+
         # 建立UI
         self.create_ui()
 
@@ -74,6 +82,9 @@ class QuestionExtractorApp:
 
         # 啟動定期檢查待處理清單
         self.check_pending_queue()
+
+        # 啟動一氣呵成任務處理器
+        self.check_oneshot_queue()
 
     def create_ui(self):
         """建立使用者界面"""
@@ -276,9 +287,20 @@ class QuestionExtractorApp:
         """處理圖片（在背景執行緒中運行）"""
         self.log(f"開始處理 {len(file_paths)} 張圖片...")
 
+        # 檢查一氣呵成模式
+        oneshot_enabled = self.config.get('one_shot_mode_enabled', False)
+        if oneshot_enabled:
+            # 重置統計
+            with self.oneshot_lock:
+                self.oneshot_total_processed = 0
+                self.oneshot_total_success = 0
+                self.oneshot_total_failed = 0
+            self.log("🚀 一氣呵成模式已啟用")
+
         total_new = 0
         total_duplicate = 0
         total_similar = 0
+        oneshot_queued = 0  # 加入一氣呵成佇列的題目數
 
         for i, file_path in enumerate(file_paths, 1):
             self.log(f"\n正在處理 [{i}/{len(file_paths)}]: {Path(file_path).name}")
@@ -314,6 +336,17 @@ class QuestionExtractorApp:
                         if status == "new":
                             total_new += 1
                             self.log(f"  新增題目 ID: {question_id}")
+
+                            # 一氣呵成：自動加入任務佇列
+                            if oneshot_enabled:
+                                task_data = {
+                                    'question_id': question_id,
+                                    'action': self.config.get('one_shot_action', 'answer'),
+                                    'include_image': self.config.get('one_shot_include_image', True)
+                                }
+                                self.oneshot_task_queue.put(task_data)
+                                oneshot_queued += 1
+
                         elif status == "duplicate":
                             total_duplicate += 1
                             self.log(f"  跳過重複題目 (ID: {question_id})")
@@ -337,6 +370,12 @@ class QuestionExtractorApp:
 
         self.log(f"\n所有圖片處理完成！")
         self.log(f"總計 - 新增: {total_new} 道, 重複: {total_duplicate} 道, 近似待處理: {total_similar} 道")
+
+        if oneshot_enabled and oneshot_queued > 0:
+            action_name = {'answer': '答題', 'note': '解題', 'both': '答題+解題'}
+            action_text = action_name.get(self.config.get('one_shot_action', 'answer'), '處理')
+            self.log(f"🚀 已加入 {oneshot_queued} 道題目到一氣呵成佇列（{action_text}）")
+            self.log(f"   最大併行數: {self.config.get('one_shot_max_concurrent', 3)}")
 
         # 重新整理列表
         self.root.after(0, self.refresh_question_list)
@@ -763,6 +802,139 @@ class QuestionExtractorApp:
             }
         """
         ComparisonDialog(self.root, self.db, pending_data, self.refresh_question_list, self.log)
+
+    def check_oneshot_queue(self):
+        """定期檢查一氣呵成任務佇列並啟動處理"""
+        # 檢查是否啟用一氣呵成模式
+        if not self.config.get('one_shot_mode_enabled', False):
+            self.root.after(500, self.check_oneshot_queue)
+            return
+
+        max_concurrent = self.config.get('one_shot_max_concurrent', 3)
+
+        # 嘗試啟動新任務（如果有空位）
+        with self.oneshot_lock:
+            while self.oneshot_active_tasks < max_concurrent:
+                try:
+                    # 非阻塞獲取任務
+                    task_data = self.oneshot_task_queue.get_nowait()
+                    # 啟動背景執行緒處理任務
+                    self.oneshot_active_tasks += 1
+                    thread = threading.Thread(target=self.process_oneshot_task, args=(task_data,), daemon=True)
+                    thread.start()
+                except queue.Empty:
+                    break
+
+        # 每 500ms 檢查一次
+        self.root.after(500, self.check_oneshot_queue)
+
+    def process_oneshot_task(self, task_data):
+        """
+        處理一氣呵成任務（在背景執行緒中運行）
+
+        Args:
+            task_data: 字典包含 {
+                'question_id': 題目 ID,
+                'action': 'answer' / 'note' / 'both',
+                'include_image': True/False
+            }
+        """
+        question_id = task_data['question_id']
+        action = task_data['action']
+        include_image = task_data['include_image']
+
+        try:
+            # 獲取題目資料
+            question_data = self.db.get_question(question_id)
+            if not question_data:
+                raise Exception(f"找不到題目 ID: {question_id}")
+
+            # 根據動作執行對應處理
+            if action in ['answer', 'both']:
+                self.oneshot_generate_answer(question_data, include_image)
+
+            if action in ['note', 'both']:
+                self.oneshot_generate_note(question_data, include_image)
+
+            # 成功
+            with self.oneshot_lock:
+                self.oneshot_total_success += 1
+                self.oneshot_total_processed += 1
+
+            # 使用預設參數捕獲變數值
+            self.root.after(0, lambda qid=question_id, act=action:
+                          self.log(f"✓ 一氣呵成完成 ID {qid} ({act})"))
+
+        except Exception as e:
+            # 失敗
+            with self.oneshot_lock:
+                self.oneshot_total_failed += 1
+                self.oneshot_total_processed += 1
+
+            # 使用預設參數捕獲變數值
+            error_msg = str(e)
+            self.root.after(0, lambda qid=question_id, msg=error_msg:
+                          self.log(f"✗ 一氣呵成失敗 ID {qid}: {msg}"))
+
+        finally:
+            # 釋放任務槽
+            with self.oneshot_lock:
+                self.oneshot_active_tasks -= 1
+
+    def oneshot_generate_answer(self, question_data, include_image):
+        """生成答案（一氣呵成模式）"""
+        # 檢查是否應該跳過
+        skip_answered = self.config.get('one_shot_skip_answered', True)
+        if skip_answered and question_data.get('correct_answer'):
+            return
+
+        # 檢查圖片關鍵字
+        auto_detect = self.config.get('auto_detect_image_keywords', False)
+        if auto_detect and self.contains_image_keywords(question_data['question']):
+            include_image = True
+
+        # 調用 API 生成答案（使用 answer_single_question 方法）
+        answer, note = self.answer_client.answer_single_question(
+            question=question_data['question'],
+            options=question_data['options'],
+            image_path=question_data.get('image_path', ''),
+            include_image=include_image,
+            generate_note=False
+        )
+
+        if answer:
+            # 更新答案（使用 update_question 方法）
+            self.db.update_question(question_data['id'], correct_answer=answer)
+            self.root.after(0, self.refresh_question_list)
+
+    def oneshot_generate_note(self, question_data, include_image):
+        """生成解析（一氣呵成模式）"""
+        # 檢查是否有答案
+        if not question_data.get('correct_answer'):
+            return  # 沒有答案就跳過
+
+        # 檢查是否已有解析
+        if question_data.get('note'):
+            return  # 已有解析就跳過
+
+        # 檢查圖片關鍵字
+        auto_detect = self.config.get('auto_detect_image_keywords', False)
+        if auto_detect and self.contains_image_keywords(question_data['question']):
+            include_image = True
+
+        # 調用 API 生成解析（使用 generate_note_for_question 方法）
+        note = self.answer_client.generate_note_for_question(
+            question=question_data['question'],
+            options=question_data['options'],
+            answer=question_data['correct_answer'],
+            image_path=question_data.get('image_path', ''),
+            include_image=include_image
+        )
+
+        if note:
+            # 更新解析（使用 update_question 方法）
+            self.db.update_question(question_data['id'], note=note)
+            self.root.after(0, self.refresh_question_list)
 
 
 class ModelSettingsDialog:
@@ -1297,11 +1469,92 @@ class GlobalSettingsDialog:
                          "※ 偵測到時會強制發送圖片給 AI，無論是否勾選包含圖片"
         ttk.Label(image_frame, text=image_info_text, font=('Arial', 8), foreground='gray').pack(pady=5)
 
+        # 一氣呵成實驗功能
+        oneshot_frame = ttk.LabelFrame(main_frame, text="🚀 一氣呵成（實驗功能）", padding="10")
+        oneshot_frame.pack(fill=tk.X, pady=5)
+
+        self.one_shot_enabled_var = tk.BooleanVar(
+            value=self.config.get('one_shot_mode_enabled', False)
+        )
+
+        ttk.Checkbutton(oneshot_frame, text="啟用一氣呵成模式",
+                       variable=self.one_shot_enabled_var,
+                       command=self.toggle_oneshot_options).pack(anchor=tk.W, pady=5)
+
+        # 一氣呵成選項容器
+        self.oneshot_options_frame = ttk.Frame(oneshot_frame)
+        self.oneshot_options_frame.pack(fill=tk.X, padx=20)
+
+        # 動作選擇
+        action_frame = ttk.Frame(self.oneshot_options_frame)
+        action_frame.pack(fill=tk.X, pady=2)
+        ttk.Label(action_frame, text="辨識後動作：").pack(side=tk.LEFT)
+
+        self.one_shot_action_var = tk.StringVar(
+            value=self.config.get('one_shot_action', 'answer')
+        )
+        ttk.Radiobutton(action_frame, text="僅答題", variable=self.one_shot_action_var,
+                       value='answer').pack(side=tk.LEFT, padx=5)
+        ttk.Radiobutton(action_frame, text="僅解題", variable=self.one_shot_action_var,
+                       value='note').pack(side=tk.LEFT, padx=5)
+        ttk.Radiobutton(action_frame, text="答題+解題", variable=self.one_shot_action_var,
+                       value='both').pack(side=tk.LEFT, padx=5)
+
+        # 跳過選項
+        self.one_shot_skip_answered_var = tk.BooleanVar(
+            value=self.config.get('one_shot_skip_answered', True)
+        )
+        ttk.Checkbutton(self.oneshot_options_frame, text="跳過已答題目",
+                       variable=self.one_shot_skip_answered_var).pack(anchor=tk.W, pady=2)
+
+        # 包含圖片
+        self.one_shot_include_image_var = tk.BooleanVar(
+            value=self.config.get('one_shot_include_image', True)
+        )
+        ttk.Checkbutton(self.oneshot_options_frame, text="包含圖片發送給 AI",
+                       variable=self.one_shot_include_image_var).pack(anchor=tk.W, pady=2)
+
+        # 併行數量
+        concurrent_frame = ttk.Frame(self.oneshot_options_frame)
+        concurrent_frame.pack(fill=tk.X, pady=2)
+        ttk.Label(concurrent_frame, text="最大併行任務數：").pack(side=tk.LEFT)
+        self.one_shot_max_concurrent_var = tk.IntVar(
+            value=self.config.get('one_shot_max_concurrent', 3)
+        )
+        concurrent_spinbox = ttk.Spinbox(concurrent_frame, from_=1, to=10, width=5,
+                                        textvariable=self.one_shot_max_concurrent_var)
+        concurrent_spinbox.pack(side=tk.LEFT, padx=5)
+
+        # 說明文字
+        oneshot_info_text = "※ 啟用後，批量圖片辨識完成後自動答題/解題\n" \
+                           "※ 每道題目獨立處理，不影響下一張圖片繼續辨識\n" \
+                           "※ 併行任務數控制同時處理的題目數量，避免記憶體溢出\n" \
+                           "※ 建議併行數設定為 3-5，視電腦效能調整"
+        ttk.Label(oneshot_frame, text=oneshot_info_text, font=('Arial', 8), foreground='gray').pack(pady=5)
+
+        # 初始化選項狀態
+        self.toggle_oneshot_options()
+
         # 按鈕
         button_frame = ttk.Frame(main_frame)
         button_frame.pack(pady=15)
         ttk.Button(button_frame, text="儲存", command=self.save_settings).pack(side=tk.LEFT, padx=5)
         ttk.Button(button_frame, text="取消", command=self.dialog.destroy).pack(side=tk.LEFT, padx=5)
+
+    def toggle_oneshot_options(self):
+        """切換一氣呵成選項的啟用/停用狀態"""
+        enabled = self.one_shot_enabled_var.get()
+        state = 'normal' if enabled else 'disabled'
+
+        # 遍歷所有子元件並設定狀態
+        for child in self.oneshot_options_frame.winfo_children():
+            if isinstance(child, ttk.Frame):
+                # 處理巢狀的 Frame（如動作選擇和併行數量）
+                for subchild in child.winfo_children():
+                    if isinstance(subchild, (ttk.Radiobutton, ttk.Checkbutton, ttk.Spinbox)):
+                        subchild.configure(state=state)
+            elif isinstance(child, (ttk.Radiobutton, ttk.Checkbutton, ttk.Spinbox)):
+                child.configure(state=state)
 
     def save_settings(self):
         """儲存設定到 config.json"""
@@ -1309,13 +1562,19 @@ class GlobalSettingsDialog:
             # 更新配置
             self.config['punctuation_mode'] = self.punctuation_mode_var.get()
             self.config['auto_detect_image_keywords'] = self.auto_detect_image_var.get()
+            self.config['one_shot_mode_enabled'] = self.one_shot_enabled_var.get()
+            self.config['one_shot_action'] = self.one_shot_action_var.get()
+            self.config['one_shot_skip_answered'] = self.one_shot_skip_answered_var.get()
+            self.config['one_shot_include_image'] = self.one_shot_include_image_var.get()
+            self.config['one_shot_max_concurrent'] = self.one_shot_max_concurrent_var.get()
 
             # 儲存到檔案
             with open('config.json', 'w', encoding='utf-8') as f:
                 json.dump(self.config, f, ensure_ascii=False, indent=2)
 
             self.log_callback(f"全局設定已儲存：標點模式 = {self.punctuation_mode_var.get()}, "
-                            f"自動偵測圖片 = {self.auto_detect_image_var.get()}")
+                            f"自動偵測圖片 = {self.auto_detect_image_var.get()}, "
+                            f"一氣呵成 = {self.one_shot_enabled_var.get()}")
             messagebox.showinfo("成功", "設定已儲存！\n\n※ 部分設定需重新啟動程式後生效")
             self.dialog.destroy()
 
