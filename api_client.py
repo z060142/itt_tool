@@ -7,7 +7,7 @@ import requests
 import json
 import base64
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 from PIL import Image
 import io
 
@@ -204,6 +204,205 @@ class OpenRouterClient:
             return None
         except Exception as e:
             print(f"未知錯誤: {e}")
+            return None
+
+
+    def ocr_image_slice(self, image_path: str) -> Optional[str]:
+        """
+        對圖片切片進行 OCR 文字識別（不提取題目結構）
+
+        Args:
+            image_path: 圖片切片路徑
+
+        Returns:
+            識別出的文字內容，如果失敗返回 None
+        """
+        # 編碼圖片
+        image_data = self.encode_image_to_base64(image_path)
+
+        # OCR 專用 prompt
+        prompt = """請將圖片中的所有文字完整識別出來，保持原有格式。
+
+要求：
+1. 完整識別所有文字內容，不要遺漏
+2. 保留題號格式（例如：1.、2.、3. 或 1)、2)、3)）
+3. 保留選項標記（例如：A.、B.、C.、D. 或 (A)、(B)）
+4. 保留換行和段落結構
+5. 如果有圖表或圖片，標註為 [圖片]
+6. 不要添加任何額外說明或註釋
+7. 只輸出識別的文字內容本身
+
+請直接輸出識別結果："""
+
+        # 構建請求
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+
+        if self.site_url:
+            headers["HTTP-Referer"] = self.site_url
+        if self.site_name:
+            headers["X-Title"] = self.site_name
+
+        data = {
+            "model": self.model,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": prompt
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": image_data
+                            }
+                        }
+                    ]
+                }
+            ]
+        }
+
+        try:
+            response = requests.post(
+                url=self.api_url,
+                headers=headers,
+                data=json.dumps(data),
+                timeout=60
+            )
+
+            response.raise_for_status()
+            result = response.json()
+
+            # 提取回覆內容
+            content = result['choices'][0]['message']['content']
+
+            # 清理可能的 markdown 標記
+            content = content.strip()
+            if content.startswith('```'):
+                lines = content.split('\n')
+                content = '\n'.join(lines[1:-1]) if len(lines) > 2 else content
+
+            return content
+
+        except requests.exceptions.RequestException as e:
+            print(f"OCR API請求失敗: {e}")
+            return None
+        except Exception as e:
+            print(f"OCR未知錯誤: {e}")
+            return None
+
+    def process_long_image(self, image_path: str,
+                          height_threshold: int = 3600,
+                          aspect_ratio_threshold: float = 3.0,
+                          slice_height: int = 1400,
+                          overlap_ratio: float = 0.18,
+                          progress_callback=None) -> Optional[List[Dict]]:
+        """
+        處理超長圖片（切割 → OCR → 拼接 → 提取題目）
+
+        Args:
+            image_path: 原始圖片路徑
+            height_threshold: 高度閾值（px）
+            aspect_ratio_threshold: 高寬比閾值
+            slice_height: 單片高度（px）
+            overlap_ratio: 重疊比例
+            progress_callback: 進度回調函數 callback(step, message, progress)
+
+        Returns:
+            提取的題目列表，如果失敗返回 None
+        """
+        try:
+            from image_splitter import ImageSplitter
+            from text_processor import TextProcessor
+
+            # 建立圖片切割器
+            splitter = ImageSplitter(
+                height_threshold=height_threshold,
+                aspect_ratio_threshold=aspect_ratio_threshold,
+                slice_height=slice_height,
+                overlap_ratio=overlap_ratio
+            )
+
+            # 檢查是否需要切割
+            if progress_callback:
+                progress_callback("check", "檢查圖片尺寸...", 0)
+
+            if not splitter.should_split(image_path):
+                # 不需要切割，使用原有方法
+                if progress_callback:
+                    progress_callback("extract", "圖片未超過閾值，使用標準提取流程", 100)
+
+                result = self.extract_questions_from_image(image_path)
+                if result and 'questions' in result:
+                    return result['questions']
+                return None
+
+            # 需要切割
+            if progress_callback:
+                progress_callback("split", "切割圖片中...", 5)
+
+            slices = splitter.split_image(image_path)
+
+            if not slices:
+                print("圖片切割失敗")
+                return None
+
+            # 對每個切片進行 OCR
+            ocr_results = []
+            total_slices = len(slices)
+
+            for i, slice_info in enumerate(slices):
+                if progress_callback:
+                    progress = 10 + int((i / total_slices) * 60)
+                    progress_callback("ocr", f"識別切片 {i+1}/{total_slices}...", progress)
+
+                text = self.ocr_image_slice(slice_info['path'])
+
+                if text:
+                    ocr_results.append(text)
+                    print(f"切片 {i+1} OCR完成，文字長度: {len(text)} 字元")
+                else:
+                    print(f"切片 {i+1} OCR失敗")
+                    ocr_results.append("")  # 添加空字串保持順序
+
+            # 拼接文字
+            if progress_callback:
+                progress_callback("merge", "拼接文字中...", 75)
+
+            processor = TextProcessor()
+            merged_text = processor.merge_texts(ocr_results, verbose=True)
+
+            print(f"\n拼接後總文字長度: {len(merged_text)} 字元")
+
+            # 提取題目
+            if progress_callback:
+                progress_callback("extract", "提取題目中...", 85)
+
+            questions = processor.extract_questions_from_text(merged_text, verbose=True)
+
+            # 清理臨時檔案
+            if progress_callback:
+                progress_callback("cleanup", "清理臨時檔案...", 95)
+
+            splitter.cleanup()
+
+            if progress_callback:
+                progress_callback("done", f"完成！共提取 {len(questions)} 個題目", 100)
+
+            return questions
+
+        except ImportError as e:
+            print(f"導入模組失敗: {e}")
+            print("請確保 image_splitter.py 和 text_processor.py 在同一目錄")
+            return None
+        except Exception as e:
+            print(f"處理超長圖片時發生錯誤: {e}")
+            import traceback
+            traceback.print_exc()
             return None
 
 

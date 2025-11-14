@@ -103,6 +103,7 @@ class QuestionExtractorApp:
         # 圖片處理區
         ttk.Label(control_frame, text="圖片處理", font=('Arial', 9, 'bold')).pack(pady=(0, 5))
         ttk.Button(control_frame, text="批量上傳圖片", command=self.upload_images, width=20).pack(pady=2)
+        ttk.Button(control_frame, text="處理超長圖片", command=self.process_long_image, width=20).pack(pady=2)
         ttk.Button(control_frame, text="模型設定", command=self.open_model_settings, width=20).pack(pady=2)
         ttk.Button(control_frame, text="全局設定", command=self.open_global_settings, width=20).pack(pady=2)
 
@@ -271,6 +272,30 @@ class QuestionExtractorApp:
         # 在新執行緒中處理圖片
         thread = threading.Thread(target=self.process_images, args=(file_paths,))
         thread.start()
+
+    def process_long_image(self):
+        """處理超長圖片（切割 → OCR → 提取題目）"""
+        if not self.api_client:
+            messagebox.showerror("錯誤", "請先設置API密鑰")
+            return
+
+        # 選擇單張圖片
+        file_path = filedialog.askopenfilename(
+            title="選擇超長圖片",
+            filetypes=[("圖片檔案", "*.png *.jpg *.jpeg *.gif *.webp"), ("所有檔案", "*.*")]
+        )
+
+        if not file_path:
+            return
+
+        # 開啟進度對話框
+        progress_dialog = LongImageProgressDialog(self.root, file_path, self.api_client, self.db)
+        progress_dialog.start_processing()
+
+        # 如果成功，重新整理列表
+        if progress_dialog.success:
+            self.refresh_question_list()
+            self.log(f"\n超長圖片處理完成！共提取 {len(progress_dialog.extracted_questions)} 道題目")
 
     def process_images(self, file_paths):
         """處理圖片（在背景執行緒中運行）"""
@@ -1648,6 +1673,222 @@ class ComparisonDialog:
                 subprocess.run(['xdg-open', image_path])
         except Exception as e:
             messagebox.showerror("錯誤", f"無法開啟圖片: {e}")
+
+
+class LongImageProgressDialog:
+    """超長圖片處理進度對話框"""
+
+    def __init__(self, parent, image_path, api_client, db):
+        """
+        初始化對話框
+
+        Args:
+            parent: 父視窗
+            image_path: 圖片路徑
+            api_client: API客戶端
+            db: 題目資料庫
+        """
+        self.parent = parent
+        self.image_path = image_path
+        self.api_client = api_client
+        self.db = db
+        self.extracted_questions = []
+        self.success = False
+
+        # 建立對話框
+        self.dialog = tk.Toplevel(parent)
+        self.dialog.title("處理超長圖片")
+        self.dialog.geometry("700x600")
+        self.dialog.transient(parent)
+        self.dialog.grab_set()
+
+        # 主框架
+        main_frame = ttk.Frame(self.dialog, padding="10")
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        # 標題
+        title_label = ttk.Label(main_frame, text=f"正在處理: {Path(image_path).name}",
+                               font=('Arial', 10, 'bold'))
+        title_label.pack(pady=(0, 10))
+
+        # 進度條
+        self.progress_var = tk.DoubleVar()
+        self.progress_bar = ttk.Progressbar(main_frame, variable=self.progress_var,
+                                           maximum=100, length=600)
+        self.progress_bar.pack(pady=10)
+
+        # 狀態標籤
+        self.status_label = ttk.Label(main_frame, text="準備開始...", font=('Arial', 9))
+        self.status_label.pack(pady=5)
+
+        # 日誌區域
+        log_frame = ttk.LabelFrame(main_frame, text="處理日誌", padding="5")
+        log_frame.pack(fill=tk.BOTH, expand=True, pady=10)
+
+        self.log_text = scrolledtext.ScrolledText(log_frame, height=15, width=80, wrap=tk.WORD)
+        self.log_text.pack(fill=tk.BOTH, expand=True)
+
+        # 按鈕區域
+        button_frame = ttk.Frame(main_frame)
+        button_frame.pack(pady=10)
+
+        self.preview_button = ttk.Button(button_frame, text="預覽題目", command=self.preview_questions)
+        self.preview_button.pack(side=tk.LEFT, padx=5)
+        self.preview_button.config(state=tk.DISABLED)
+
+        self.confirm_button = ttk.Button(button_frame, text="確認並添加", command=self.confirm_add)
+        self.confirm_button.pack(side=tk.LEFT, padx=5)
+        self.confirm_button.config(state=tk.DISABLED)
+
+        self.close_button = ttk.Button(button_frame, text="關閉", command=self.close_dialog)
+        self.close_button.pack(side=tk.LEFT, padx=5)
+        self.close_button.config(state=tk.DISABLED)
+
+    def log(self, message):
+        """輸出日誌"""
+        self.log_text.insert(tk.END, f"{message}\n")
+        self.log_text.see(tk.END)
+        self.dialog.update_idletasks()
+
+    def update_progress(self, step, message, progress):
+        """
+        更新進度
+
+        Args:
+            step: 步驟名稱
+            message: 狀態訊息
+            progress: 進度（0-100）
+        """
+        self.status_label.config(text=message)
+        self.progress_var.set(progress)
+        self.log(f"[{progress}%] {message}")
+
+    def start_processing(self):
+        """開始處理（在背景執行緒中）"""
+        thread = threading.Thread(target=self._process_thread)
+        thread.start()
+
+    def _process_thread(self):
+        """處理執行緒"""
+        try:
+            self.log("="*60)
+            self.log("開始處理超長圖片...")
+            self.log("="*60)
+
+            # 調用 API 處理
+            questions = self.api_client.process_long_image(
+                self.image_path,
+                progress_callback=self.update_progress
+            )
+
+            if questions:
+                self.extracted_questions = questions
+                self.log(f"\n成功提取 {len(questions)} 道題目！")
+
+                # 啟用預覽和確認按鈕
+                self.dialog.after(0, lambda: self.preview_button.config(state=tk.NORMAL))
+                self.dialog.after(0, lambda: self.confirm_button.config(state=tk.NORMAL))
+            else:
+                self.log("\n未提取到任何題目，或處理失敗")
+
+        except Exception as e:
+            self.log(f"\n處理發生錯誤: {e}")
+            import traceback
+            self.log(traceback.format_exc())
+
+        finally:
+            # 啟用關閉按鈕
+            self.dialog.after(0, lambda: self.close_button.config(state=tk.NORMAL))
+
+    def preview_questions(self):
+        """預覽提取的題目"""
+        if not self.extracted_questions:
+            messagebox.showinfo("提示", "沒有可預覽的題目")
+            return
+
+        # 建立預覽視窗
+        preview_window = tk.Toplevel(self.dialog)
+        preview_window.title("題目預覽")
+        preview_window.geometry("800x600")
+
+        # 預覽文字區域
+        preview_text = scrolledtext.ScrolledText(preview_window, width=90, height=35, wrap=tk.WORD)
+        preview_text.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        # 格式化並顯示題目
+        from text_processor import TextProcessor
+        processor = TextProcessor()
+
+        for i, q in enumerate(self.extracted_questions):
+            preview_text.insert(tk.END, processor.format_question_preview(q, i))
+
+        preview_text.config(state=tk.DISABLED)
+
+    def confirm_add(self):
+        """確認並添加題目到題庫"""
+        if not self.extracted_questions:
+            messagebox.showinfo("提示", "沒有可添加的題目")
+            return
+
+        confirm = messagebox.askyesno("確認", f"確定要將 {len(self.extracted_questions)} 道題目添加到題庫嗎？")
+
+        if not confirm:
+            return
+
+        # 添加題目
+        self.log("\n"+"="*60)
+        self.log("開始添加題目到題庫...")
+        self.log("="*60)
+
+        total_new = 0
+        total_duplicate = 0
+        total_failed = 0
+
+        for i, q in enumerate(self.extracted_questions, 1):
+            try:
+                # 計算 hash 用於圖片檔名
+                combined_hash = self.db.calculate_combined_hash(
+                    q.get('question', ''),
+                    q.get('options', {})
+                )
+
+                # 儲存圖片並獲取路徑
+                image_path = self.db.save_image(self.image_path, combined_hash)
+
+                # 添加題目
+                question_id, status, similar_questions = self.db.add_question(
+                    question=q.get('question', ''),
+                    options=q.get('options', {}),
+                    correct_answer='',  # 超長圖片模式不自動設定答案
+                    image_path=image_path,
+                    source=f"{self.image_path} (超長圖片)"
+                )
+
+                if status == "new":
+                    total_new += 1
+                    self.log(f"[{i}/{len(self.extracted_questions)}] 新增題目 ID: {question_id}")
+                elif status == "duplicate":
+                    total_duplicate += 1
+                    self.log(f"[{i}/{len(self.extracted_questions)}] 跳過重複題目 (ID: {question_id})")
+
+            except Exception as e:
+                total_failed += 1
+                self.log(f"[{i}/{len(self.extracted_questions)}] 添加失敗: {e}")
+
+        self.log("\n"+"="*60)
+        self.log("題目添加完成！")
+        self.log(f"總計 - 新增: {total_new} 道, 重複: {total_duplicate} 道, 失敗: {total_failed} 道")
+        self.log("="*60)
+
+        self.success = True
+        messagebox.showinfo("完成", f"已添加 {total_new} 道新題目到題庫！")
+
+        # 停用確認按鈕
+        self.confirm_button.config(state=tk.DISABLED)
+
+    def close_dialog(self):
+        """關閉對話框"""
+        self.dialog.destroy()
 
 
 def main():
